@@ -91,7 +91,7 @@ class RepoOps:
         self.repo_path = Path(repo_path)
         self.to_exclude = {'/setup.py', '/test', '/example', '/docs', '/site-packages', '.venv', 'virtualenv', '/dist'}
         self.file_names_to_exclude = ['test_', 'conftest', '_test.py']
-
+        # 对输入的待分析开源项目进行分析，根据文件名及文件中的语法判断使用哪些 web 应用框架
         patterns = [
             #Async
             r'async\sdef\s\w+\(.*?request',
@@ -184,6 +184,7 @@ class RepoOps:
             # Google Cloud Functions
             r'def\s+\w+\(request\):'
 
+            # web 应用启动代码
             # Server startup code
             r'app\.run\(.*?\)',
             r'serve\(app,.*?\)',
@@ -210,7 +211,7 @@ class RepoOps:
             r'app\.start_server\(.*?\)',  # Sanic
             r'Server\(.*?\)\.run\(\)',    # Bottle
         ]
-
+        # 将正则表达式进行编译，输出正则表达式对象列表
         # Compile the patterns for efficiency
         self.compiled_patterns = [re.compile(pattern) for pattern in patterns]
 
@@ -242,6 +243,7 @@ class RepoOps:
             f_str = f_str.lower()
 
             # Check if any exclusion pattern matches a substring of the full path
+            # 筛选掉非功能代码或文件
             if any(exclude in f_str for exclude in self.to_exclude):
                 continue
 
@@ -254,6 +256,9 @@ class RepoOps:
         return files
 
     def get_network_related_files(self, files: List) -> Generator[Path, None, None]:
+        '''
+        读取文件内容并进行正则表达式匹配，输出与用户输入相关的文件（web应用路由 api 函数、web 应用开启函数）
+        '''
         for py_f in files:
             with py_f.open(encoding='utf-8') as f:
                 content = f.read()
@@ -297,6 +302,13 @@ def print_readable(report: Response) -> None:
         print()  # Add an empty line between attributes
 
 def run():
+    '''
+    可输入参数如下：
+    --root: 待分析开源项目的根目录，必填
+    --analyze: 指定需要分析的路径或文件
+    --llm: 指定 llms，可选 claude、gpt
+    --verbosity
+    '''
     parser = argparse.ArgumentParser(description='Analyze a GitHub project for vulnerabilities. Export your ANTHROPIC_API_KEY before running.')
     parser.add_argument('-r', '--root', type=str, required=True, help='Path to the root directory of the project')
     parser.add_argument('-a', '--analyze', type=str, help='Specific path or file within the project to analyze')
@@ -305,8 +317,10 @@ def run():
     args = parser.parse_args()
 
     repo = RepoOps(args.root)
+
     code_extractor = SymbolExtractor(args.root)
     # Get repo files that don't include stuff like tests and documentation
+    # 得到一个不含非功能实现代码的文件列表
     files = repo.get_relevant_py_files()
 
     # User specified --analyze flag
@@ -329,9 +343,12 @@ def run():
     elif args.llm == 'gpt':
         llm = ChatGPT()
 
+    # 查找 readme 相关文件并进行读取分析
     readme_content = repo.get_readme_content()
     if readme_content:
         log.info("Summarizing project README")
+        # chat(self, user_prompt: str, response_model: BaseModel = None, max_tokens: int = 4096) -> Union[BaseModel, str]
+        # 使用 llm client 接口，分析 Readme 并返回回复并保持聊天上下文
         summary = llm.chat(
             (ReadmeContent(content=readme_content).to_xml() + b'\n' +
             Instructions(instructions=README_SUMMARY_PROMPT_TEMPLATE).to_xml()
@@ -350,7 +367,9 @@ def run():
         system_prompt = (Instructions(instructions=SYS_PROMPT_TEMPLATE).to_xml() + b'\n' +
                         ReadmeSummary(readme_summary=summary).to_xml()
                         ).decode()
-
+        # 待确认其输出
+        print("\n------------ DEBUG system_prompt ----------------\n")
+        print(system_prompt)
         # This is the Initial analysis
         with py_f.open(encoding='utf-8') as f:
             content = f.read()
@@ -375,10 +394,12 @@ def run():
                     )
                 ).to_xml()
             ).decode()
-
+            print("\n------------ DEBUG user_prompt ----------------\n")
+            print(user_prompt)
             initial_analysis_report: Response = llm.chat(user_prompt, response_model=Response)
             log.info("Initial analysis complete", report=initial_analysis_report.model_dump())
-
+            # 初步分析的响应文本
+            print("\n---------- 输出初次分析的结果 ------------------\n")
             print_readable(initial_analysis_report)
 
             # Secondary analysis
@@ -444,7 +465,8 @@ def run():
                                 )
                             ).to_xml()
                         ).decode()
-
+                        print("\n------------------- vuln_specific_user_prompt -----------------\n")
+                        print(vuln_specific_user_prompt)
                         secondary_analysis_report: Response = llm.chat(vuln_specific_user_prompt, response_model=Response)
                         log.info("Secondary analysis complete", secondary_analysis_report=secondary_analysis_report.model_dump())
 
